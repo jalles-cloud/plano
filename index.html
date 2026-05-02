@@ -8,6 +8,38 @@
 <meta name="theme-color" content="#5b21b6">
 <title>Plano Jefferson 🥗</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🥗</text></svg>">
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js";
+  import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js";
+  import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyAGBoxFcRfNm_WQYG-uHwz5ZrOqE161yo4",
+    authDomain: "plano-jefferson.firebaseapp.com",
+    projectId: "plano-jefferson",
+    storageBucket: "plano-jefferson.firebasestorage.app",
+    messagingSenderId: "158045605286",
+    appId: "1:158045605286:web:040220c06f8de69a819367"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+  const provider = new GoogleAuthProvider();
+
+  window.firebaseAuth = auth;
+  window.firebaseDb = db;
+  window.firebaseProvider = provider;
+  window.firebaseSignIn = () => signInWithPopup(auth, provider);
+  window.firebaseSignOut = () => signOut(auth);
+  window.firebaseOnAuth = (cb) => onAuthStateChanged(auth, cb);
+  window.firebaseSetDoc = setDoc;
+  window.firebaseGetDoc = getDoc;
+  window.firebaseDocRef = (path) => doc(db, path);
+  window.firebaseOnSnapshot = onSnapshot;
+  window.firebaseReady = true;
+  document.dispatchEvent(new Event('firebaseReady'));
+</script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
 html,body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0a14;color:#e8e8e8;min-height:100vh;font-size:15px;line-height:1.5;}
@@ -198,9 +230,37 @@ body{max-width:480px;margin:0 auto;padding:14px 14px 100px;background:linear-gra
 .toast.show{transform:translateX(-50%) translateY(0);}
 
 .footer-tip{margin-top:24px;padding:14px;background:#1a1a2e;border:1px dashed #4b5563;border-radius:14px;font-size:11px;color:#9ca3af;text-align:center;line-height:1.6;}
+
+/* SYNC BAR */
+.sync-bar{background:#1a1a2e;border:1px solid #2a2a44;border-radius:14px;padding:10px 14px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;font-size:12px;}
+.sync-info{display:flex;align-items:center;gap:8px;flex:1;min-width:0;}
+.sync-avatar{width:28px;height:28px;border-radius:50%;background:#2a2a44;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;overflow:hidden;}
+.sync-avatar img{width:100%;height:100%;object-fit:cover;}
+.sync-text{flex:1;min-width:0;}
+.sync-name{font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.sync-status{font-size:10px;color:#9ca3af;display:flex;align-items:center;gap:4px;}
+.sync-dot{width:6px;height:6px;border-radius:50%;background:#34d399;flex-shrink:0;}
+.sync-dot.syncing{background:#fbbf24;animation:pulse 1s infinite;}
+.sync-dot.error{background:#f87171;}
+.sync-dot.offline{background:#6b7280;}
+.sync-btn{background:linear-gradient(135deg,#7c3aed 0%,#a78bfa 100%);color:#fff;border:none;padding:7px 12px;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;}
+.sync-btn.logout{background:#2a2a44;color:#9ca3af;}
+.sync-btn:active{transform:scale(0.95);}
 </style>
 </head>
 <body>
+
+<!-- SYNC BAR -->
+<div class="sync-bar" id="sync-bar">
+  <div class="sync-info">
+    <div class="sync-avatar" id="sync-avatar">☁️</div>
+    <div class="sync-text">
+      <div class="sync-name" id="sync-name">Não conectado</div>
+      <div class="sync-status"><span class="sync-dot offline" id="sync-dot"></span><span id="sync-status-text">Dados só neste dispositivo</span></div>
+    </div>
+  </div>
+  <button class="sync-btn" id="sync-btn" onclick="handleAuth()">Entrar com Google</button>
+</div>
 
 <div class="header">
   <div class="greeting">👋 <span id="greeting-text">Olá,</span></div>
@@ -1604,6 +1664,185 @@ function importData(ev){
   reader.readAsText(file);
   ev.target.value='';
 }
+
+// ============ FIREBASE SYNC ============
+let currentUser=null;
+let syncTimeout=null;
+let isInitialLoad=true;
+let unsubscribeSnapshot=null;
+
+function setSyncStatus(status, text){
+  const dot=document.getElementById('sync-dot');
+  const statusText=document.getElementById('sync-status-text');
+  dot.className='sync-dot '+status;
+  statusText.textContent=text;
+}
+
+window.handleAuth=function(){
+  if(currentUser){
+    if(confirm('Sair da conta? Seus dados ficarão salvos na nuvem.')){
+      window.firebaseSignOut();
+    }
+  }else{
+    if(!window.firebaseReady){showToast('Aguarde, carregando...');return;}
+    window.firebaseSignIn().catch(function(err){
+      console.error('Erro login:',err);
+      showToast('Erro ao fazer login: '+(err.message||'tente novamente'));
+    });
+  }
+};
+
+function collectAllData(){
+  const data={
+    timestamp:Date.now(),
+    today:{},
+    extras:{},
+    water:0,
+    waterSize:getCupSize(),
+    weights:get(WEIGHT_KEY,[]),
+    workouts:get(WORKOUT_KEY,[])
+  };
+  // Refeições marcadas (todos os dias salvos)
+  for(let i=0;i<localStorage.length;i++){
+    const k=localStorage.key(i);
+    if(k&&k.startsWith('plano_jefferson_')){
+      if(k.endsWith('_water')){
+        data.water_days=data.water_days||{};
+        data.water_days[k]=localStorage.getItem(k);
+      }else if(k.endsWith('_extras')){
+        data.extras_days=data.extras_days||{};
+        data.extras_days[k]=localStorage.getItem(k);
+      }else if(k!==WEIGHT_KEY&&k!==WORKOUT_KEY&&k!==WATER_SIZE_KEY){
+        data.checked_days=data.checked_days||{};
+        data.checked_days[k]=localStorage.getItem(k);
+      }
+    }
+  }
+  return data;
+}
+
+function applyDataFromCloud(data){
+  if(!data)return;
+  // Limpa tudo local primeiro
+  const keys=[];
+  for(let i=0;i<localStorage.length;i++){
+    const k=localStorage.key(i);
+    if(k&&k.startsWith('plano_jefferson_'))keys.push(k);
+  }
+  keys.forEach(function(k){localStorage.removeItem(k);});
+  // Aplica dados da nuvem
+  if(data.weights)set(WEIGHT_KEY,data.weights);
+  if(data.workouts)set(WORKOUT_KEY,data.workouts);
+  if(data.waterSize)set(WATER_SIZE_KEY,data.waterSize);
+  if(data.checked_days){Object.keys(data.checked_days).forEach(function(k){localStorage.setItem(k,data.checked_days[k]);});}
+  if(data.water_days){Object.keys(data.water_days).forEach(function(k){localStorage.setItem(k,data.water_days[k]);});}
+  if(data.extras_days){Object.keys(data.extras_days).forEach(function(k){localStorage.setItem(k,data.extras_days[k]);});}
+  // Re-renderiza tudo
+  document.querySelectorAll('.check-row').forEach(function(r){r.classList.remove('checked');});
+  loadCheckedRows();
+  document.querySelectorAll('.opt').forEach(function(opt){
+    const rows=opt.querySelectorAll('.check-row');
+    const btn=opt.querySelector('.add-opt-btn');
+    if(rows.length&&Array.from(rows).every(function(r){return r.classList.contains('checked');})){
+      btn.classList.add('added');btn.textContent='✓ Refeição marcada!';
+    }else{
+      btn.classList.remove('added');btn.textContent='✓ Marcar refeição completa';
+    }
+  });
+  renderWater();renderExtras();renderWeightHistory();renderTodayWorkouts();renderWorkoutHistory();renderWeekSummary();updateHeader();updateDash();
+  if(document.getElementById('peso').classList.contains('active'))renderWeightChart();
+}
+
+function syncToCloud(){
+  if(!currentUser||!window.firebaseReady)return;
+  if(syncTimeout)clearTimeout(syncTimeout);
+  setSyncStatus('syncing','Sincronizando...');
+  syncTimeout=setTimeout(function(){
+    const ref=window.firebaseDocRef('users/'+currentUser.uid+'/data/main');
+    const data=collectAllData();
+    window.firebaseSetDoc(ref,data).then(function(){
+      setSyncStatus('','Sincronizado · '+new Date().toLocaleTimeString('pt-BR').slice(0,5));
+    }).catch(function(err){
+      console.error('Erro sync:',err);
+      setSyncStatus('error','Erro ao sincronizar');
+    });
+  },1500);
+}
+
+function setupAuthListener(){
+  if(!window.firebaseReady)return;
+  window.firebaseOnAuth(function(user){
+    if(user){
+      currentUser=user;
+      document.getElementById('sync-name').textContent=user.displayName||user.email;
+      document.getElementById('sync-btn').textContent='Sair';
+      document.getElementById('sync-btn').classList.add('logout');
+      const av=document.getElementById('sync-avatar');
+      if(user.photoURL){av.innerHTML='<img src="'+user.photoURL+'" referrerpolicy="no-referrer">';}
+      else{av.textContent='👤';}
+      setSyncStatus('syncing','Conectando...');
+      // Listener em tempo real
+      const ref=window.firebaseDocRef('users/'+user.uid+'/data/main');
+      if(unsubscribeSnapshot)unsubscribeSnapshot();
+      unsubscribeSnapshot=window.firebaseOnSnapshot(ref,function(snap){
+        if(snap.exists()){
+          const remoteData=snap.data();
+          if(isInitialLoad){
+            // Primeira carga: aplica dados da nuvem
+            applyDataFromCloud(remoteData);
+            isInitialLoad=false;
+            setSyncStatus('','Sincronizado · '+new Date().toLocaleTimeString('pt-BR').slice(0,5));
+            showToast('☁️ Dados carregados da nuvem!');
+          }else{
+            // Atualizações futuras (de outro dispositivo)
+            const localTs=parseInt(localStorage.getItem('plano_jefferson_last_sync')||0);
+            if(remoteData.timestamp>localTs+5000){
+              applyDataFromCloud(remoteData);
+              setSyncStatus('','Atualizado de outro dispositivo');
+              showToast('🔄 Dados atualizados!');
+            }
+          }
+          localStorage.setItem('plano_jefferson_last_sync',remoteData.timestamp);
+        }else if(isInitialLoad){
+          // Primeiro login: sobe dados locais
+          isInitialLoad=false;
+          syncToCloud();
+          showToast('☁️ Conta criada! Dados sincronizados.');
+        }
+      },function(err){
+        console.error('Snapshot err:',err);
+        setSyncStatus('error','Erro de conexão');
+      });
+    }else{
+      // Logged out
+      if(unsubscribeSnapshot){unsubscribeSnapshot();unsubscribeSnapshot=null;}
+      currentUser=null;
+      isInitialLoad=true;
+      document.getElementById('sync-name').textContent='Não conectado';
+      document.getElementById('sync-btn').textContent='Entrar com Google';
+      document.getElementById('sync-btn').classList.remove('logout');
+      document.getElementById('sync-avatar').innerHTML='☁️';
+      setSyncStatus('offline','Dados só neste dispositivo');
+    }
+  });
+}
+
+if(window.firebaseReady)setupAuthListener();
+else document.addEventListener('firebaseReady',setupAuthListener);
+
+// Hook em todas as funções de salvamento existentes pra disparar sync
+const originalSet=window.set||set;
+window.set=function(k,v){
+  const result=originalSet(k,v);
+  if(k.startsWith('plano_jefferson_'))syncToCloud();
+  return result;
+};
+// Override do saveCheckedRows pra incluir sync
+const originalSaveCheckedRows=saveCheckedRows;
+saveCheckedRows=function(){
+  originalSaveCheckedRows();
+  syncToCloud();
+};
 
 // ============ INIT ============
 loadCheckedRows();
